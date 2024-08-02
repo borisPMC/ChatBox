@@ -25,6 +25,29 @@ class ChatboxEar:
     sd.default.samplerate = INPUT_SAMPLE_RATE
     sd.default.channels = 1
 
+    def __init__(self, model_id, assistant_model_id) -> None:
+        self.model = AutoModelForSpeechSeq2Seq.from_pretrained(
+            model_id,
+            torch_dtype=self.D_TYPE,
+            low_cpu_mem_usage=True,
+            use_safetensors=True,
+            attn_implementation="sdpa",
+        )
+        self.model.to(DEVICE)
+
+        self.processor = AutoProcessor.from_pretrained(model_id)
+
+        if assistant_model_id != None:
+            self.assistant_model = AutoModelForSpeechSeq2Seq.from_pretrained(
+                assistant_model_id,
+                torch_dtype=self.D_TYPE,
+                low_cpu_mem_usage=True,
+                use_safetensors=True,
+                attn_implementation="sdpa",
+            )
+
+            self.assistant_model.to(DEVICE)
+
     #TODO: Fix audio input
     
     def record_audio(self, duration=5.0, fs=INPUT_SAMPLE_RATE):
@@ -60,38 +83,15 @@ class ChatboxEar:
 
     def transcribe_audio(self, audio):
         
-        model_id = "simonl0909/whisper-large-v2-cantonese"
-        model = AutoModelForSpeechSeq2Seq.from_pretrained(
-            model_id,
-            torch_dtype=self.D_TYPE,
-            low_cpu_mem_usage=True,
-            use_safetensors=True,
-            attn_implementation="sdpa",
-        )
-        model.to(self.DEVICE)
-
-        processor = AutoProcessor.from_pretrained(model_id)
-
-        assistant_model_id = "alvanlii/whisper-small-cantonese"
-        assistant_model = AutoModelForSpeechSeq2Seq.from_pretrained(
-            assistant_model_id,
-            torch_dtype=self.D_TYPE,
-            low_cpu_mem_usage=True,
-            use_safetensors=True,
-            attn_implementation="sdpa",
-        )
-
-        assistant_model.to(self.DEVICE)
+        processed_in = self.processor(audio, sampling_rate=self.MODEL_SAMPLE_RATE, return_tensors="pt")
         
-        processed_in = processor(audio, sampling_rate=self.MODEL_SAMPLE_RATE, return_tensors="pt")
-        
-        gout = model.generate(
+        gout = self.model.generate(
             input_features=processed_in.input_features,
             output_scores=True, return_dict_in_generate=True
         )
         
         # Decode token ids to text
-        transcription = processor.batch_decode(gout.sequences, skip_special_tokens=True)[0]
+        transcription = self.processor.batch_decode(gout.sequences, skip_special_tokens=True)[0]
         return transcription
 
     async def main(self):
@@ -101,65 +101,87 @@ class ChatboxEar:
         transcription = self.transcribe_audio(audio)  # Transcribe audio to text
         return transcription
 
-DIALOGUE = [
-    {"role": "system", "content": "你叫做櫻子，你要同用家北原伊織進行對話，你同北原伊織係情侶關係。"},
-    # {"role": "user", "content": "櫻子，令日你會去邊度玩呀？"}
-]
-
-def append_memory(role, content):
-    DIALOGUE.append(
-        {"role": role, "content": content}
-    )
-
-def process_word(temperature=0.9, max_new_tokens=200):
+class ChatbotWernicke:
     
-    model_id = "hon9kon9ize/CantoneseLLMChat-v0.5"
-    model = AutoModelForCausalLM.from_pretrained(
-        model_id,
-        torch_dtype = torch.bfloat16,
-        device_map = 'auto',
-    )
-    tokenizer = AutoTokenizer.from_pretrained(model_id)
+    DIALOGUE = [
+        {"role": "system", "content": "你是名爲波子的家務助理AI，和六至十二歲小孩子聊天，並保持其心理健康。"},
+        {"role": "user", "content": "你好啊，我要食糖！"},
+        {"role": "assitant", "content": "好的，我馬上給你一粒糖。吃糖可以讓人心情愉快，但請記住，吃太多糖會對身體造成負擔。"},
+        {"role": "user", "content": "多謝你啊波子！"},
+        {"role": "assitant", "content": "不用謝！很高興能夠幫助你。如果你還有其他需要幫助的事情，請隨時告訴我。"}
+    ]
     
-    input_ids = tokenizer.apply_chat_template(
-        conversation=DIALOGUE, 
-        tokenize=True, 
-        add_generation_prompt=True, 
-        return_tensors='pt'
-    ).to(DEVICE)
+    def __init__(self, model_id) -> None:
+        self.model = AutoModelForCausalLM.from_pretrained(
+            model_id,
+            torch_dtype = torch.bfloat16,
+            device_map = 'auto',
+            trust_remote_code=True,
+        )
+        self.tokenizer = AutoTokenizer.from_pretrained(
+            model_id,
+            device_map = 'auto',
+            trust_remote_code=True,
+        )
+        
+    def process_dialogue(self, temperature=0.9, max_new_tokens=200):
+        
+        input_ids = self.tokenizer.apply_chat_template(
+            conversation=self.DIALOGUE, 
+            tokenize=True, 
+            add_generation_prompt=True, 
+            return_tensors='pt'
+        ).to(DEVICE)
+        
+        output_ids = self.model.generate(input_ids, 
+            max_new_tokens=max_new_tokens, 
+            temperature=temperature, 
+            num_return_sequences=1, 
+            do_sample=True, 
+            top_k=50, 
+            top_p=0.95, 
+            num_beams=3, 
+            repetition_penalty=1.18
+        )
+        
+        response = self.tokenizer.decode(output_ids[0][input_ids.shape[1]:], skip_special_tokens=False)
+        return response
     
-    output_ids = model.generate(input_ids, 
-        max_new_tokens=max_new_tokens, 
-        temperature=temperature, 
-        num_return_sequences=1, 
-        do_sample=True, 
-        top_k=50, 
-        top_p=0.95, 
-        num_beams=3, 
-        repetition_penalty=1.18
-    )
-    
-    print(output_ids)
-    response = tokenizer.decode(output_ids[0][input_ids.shape[1]:], skip_special_tokens=False)
-    return response
+    def append_memory(self, role, content):
+        self.DIALOGUE.append(
+            {"role": role, "content": content}
+        )
+        return
+        
+    def main(self, input):
+        self.append_memory("user", input)
+        res = self.process_dialogue()
+        self.append_memory("assistant", res)
+        return res
 
 def main():
-    input = "櫻子，令日你會去邊度玩呀？"
-    append_memory("user", input)
-    res = process_word()
-    print("BOT: {}".format(res))
-    append_memory("assistant", res)
+    
+    wernicke = ChatbotWernicke("stvlynn/Qwen-7B-Chat-Cantonese")
+    # mouth = ChatboxMouth()
+    
+    try:
+        while True:
+            input_text = input("\nSpeak to AI: ")
+            res = wernicke.main(input_text)
+            print("BOT: {}".format(res))
+    except KeyboardInterrupt:
+        print("\nExiting...")
 
 """Full version main()"""
 # def main():
-#     ear = ChatboxEar() # ASR
+#     ear = ChatboxEar("simonl0909/whisper-large-v2-cantonese", "alvanlii/whisper-small-cantonese") # ASR
 #     #TODO: Text Generation + Audio Generation + Interface (optional)
 #     try:
 #         while True:
 #             text = asyncio.run(ear.main())
 #             print(f"Transcription: {text}")
 #     except KeyboardInterrupt:
-#             print("\nExiting...")
+#         print("\nExiting...")
 
 if __name__ == "__main__":
     main()
