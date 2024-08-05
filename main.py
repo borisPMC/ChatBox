@@ -3,7 +3,7 @@ import samplerate
 from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor, AutoModelForCausalLM, AutoTokenizer # version < 4.43
 import librosa
 import asyncio
-import torch
+import torch # version < 2.3
 import numpy as np
 
 # Models are stored at C:\Users\{your username}}\.cache\huggingface\hub
@@ -26,6 +26,33 @@ class ChatboxEar:
     sd.default.channels = 1
 
     #TODO: Fix audio input
+
+    def __init__(self) -> None:
+        
+        model_id = "simonl0909/whisper-large-v2-cantonese"
+        self.model = AutoModelForSpeechSeq2Seq.from_pretrained(
+            model_id,
+            torch_dtype=self.D_TYPE,
+            low_cpu_mem_usage=True,
+            use_safetensors=True,
+            attn_implementation="sdpa",
+        )
+        self.model.to(DEVICE)
+
+        self.processor = AutoProcessor.from_pretrained(model_id)
+
+        assistant_model_id = "alvanlii/whisper-small-cantonese"
+
+        if assistant_model_id != None:
+            self.assistant_model = AutoModelForSpeechSeq2Seq.from_pretrained(
+                assistant_model_id,
+                torch_dtype=self.D_TYPE,
+                low_cpu_mem_usage=True,
+                use_safetensors=True,
+                attn_implementation="sdpa",
+            )
+
+            self.assistant_model.to(DEVICE)
     
     def record_audio(self, duration=5.0, fs=INPUT_SAMPLE_RATE):
         """Record audio for a specified duration."""
@@ -60,38 +87,15 @@ class ChatboxEar:
 
     def transcribe_audio(self, audio):
         
-        model_id = "simonl0909/whisper-large-v2-cantonese"
-        model = AutoModelForSpeechSeq2Seq.from_pretrained(
-            model_id,
-            torch_dtype=self.D_TYPE,
-            low_cpu_mem_usage=True,
-            use_safetensors=True,
-            attn_implementation="sdpa",
-        )
-        model.to(self.DEVICE)
-
-        processor = AutoProcessor.from_pretrained(model_id)
-
-        assistant_model_id = "alvanlii/whisper-small-cantonese"
-        assistant_model = AutoModelForSpeechSeq2Seq.from_pretrained(
-            assistant_model_id,
-            torch_dtype=self.D_TYPE,
-            low_cpu_mem_usage=True,
-            use_safetensors=True,
-            attn_implementation="sdpa",
-        )
-
-        assistant_model.to(self.DEVICE)
+        processed_in = self.processor(audio, sampling_rate=self.MODEL_SAMPLE_RATE, return_tensors="pt")
         
-        processed_in = processor(audio, sampling_rate=self.MODEL_SAMPLE_RATE, return_tensors="pt")
-        
-        gout = model.generate(
+        gout = self.model.generate(
             input_features=processed_in.input_features,
             output_scores=True, return_dict_in_generate=True
         )
         
         # Decode token ids to text
-        transcription = processor.batch_decode(gout.sequences, skip_special_tokens=True)[0]
+        transcription = self.processor.batch_decode(gout.sequences, skip_special_tokens=True)[0]
         return transcription
 
     async def main(self):
@@ -101,56 +105,99 @@ class ChatboxEar:
         transcription = self.transcribe_audio(audio)  # Transcribe audio to text
         return transcription
 
-DIALOGUE = [
-    {"role": "system", "content": "你叫做櫻子，你要同用家北原伊織進行對話，你同北原伊織係情侶關係。"},
-    # {"role": "user", "content": "櫻子，令日你會去邊度玩呀？"}
-]
+class ChatboxBrain:
 
-def append_memory(role, content):
-    DIALOGUE.append(
-        {"role": role, "content": content}
-    )
+    DIALOGUE = [
+        {"role": "system", "content": "你叫做櫻子，你要同用家北原伊織進行對話，你同北原伊織係情侶關係。"},
+        # {"role": "user", "content": "櫻子，令日你會去邊度玩呀？"}
+    ]
 
-def process_word(temperature=0.9, max_new_tokens=200):
+    def __init__(self) -> None:
+
+        model_id = "hon9kon9ize/CantoneseLLMChat-v0.5"
+        self.model = AutoModelForCausalLM.from_pretrained(
+            model_id,
+            torch_dtype = torch.bfloat16,
+            device_map = 'auto',
+        )
+        self.tokenizer = AutoTokenizer.from_pretrained(model_id)
+        
+        self.input_ids = self.tokenizer.apply_chat_template(
+            conversation=self.DIALOGUE, 
+            tokenize=True, 
+            add_generation_prompt=True, 
+            return_tensors='pt'
+        ).to(DEVICE)
+
+    def append_memory(self, role, content):
+        self.DIALOGUE.append(
+            {"role": role, "content": content}
+        )
+
+    def process_word(self, temperature=0.9, max_new_tokens=200):
+        
+        input_ids = self.tokenizer.apply_chat_template(
+            conversation=self.DIALOGUE, 
+            tokenize=True, 
+            add_generation_prompt=True, 
+            return_tensors='pt'
+        ).to(DEVICE)
+
+        output_ids = self.model.generate(input_ids, 
+            max_new_tokens=max_new_tokens, 
+            temperature=temperature, 
+            num_return_sequences=1, 
+            do_sample=True, 
+            top_k=50, 
+            top_p=0.95, 
+            num_beams=3, 
+            repetition_penalty=1.18
+        )
+        
+        print(output_ids)
+        response = self.tokenizer.decode(output_ids[0][input_ids.shape[1]:], skip_special_tokens=False)
+        return response
     
-    model_id = "hon9kon9ize/CantoneseLLMChat-v0.5"
-    model = AutoModelForCausalLM.from_pretrained(
-        model_id,
-        torch_dtype = torch.bfloat16,
-        device_map = 'auto',
-    )
-    tokenizer = AutoTokenizer.from_pretrained(model_id)
-    
-    input_ids = tokenizer.apply_chat_template(
-        conversation=DIALOGUE, 
-        tokenize=True, 
-        add_generation_prompt=True, 
-        return_tensors='pt'
-    ).to(DEVICE)
-    
-    output_ids = model.generate(input_ids, 
-        max_new_tokens=max_new_tokens, 
-        temperature=temperature, 
-        num_return_sequences=1, 
-        do_sample=True, 
-        top_k=50, 
-        top_p=0.95, 
-        num_beams=3, 
-        repetition_penalty=1.18
-    )
-    
-    print(output_ids)
-    response = tokenizer.decode(output_ids[0][input_ids.shape[1]:], skip_special_tokens=False)
-    return response
+    def main(self, input):
+        input = "櫻子，令日你會去邊度玩呀？"
+        self.append_memory("user", input)
+        res = self.process_word()
+        print("BOT: {}".format(res))
+        self.append_memory("assistant", res)
+
+class ChatboxMouth:
+
+    def __init__(self) -> None:
+        model_id = "xiaomaiiwn/vits-cantonese"
+        self.model = AutoModelForCausalLM.from_pretrained(
+            model_id,
+            torch_dtype = torch.bfloat16,
+            device_map = 'auto',
+        )
+        
+        self.model.to(DEVICE)
+        self.processor = AutoProcessor.from_pretrained(model_id)
+
+    def speak(self, text):
+        
+        processed_in = self.processor(text, sampling_rate=self.MODEL_SAMPLE_RATE, return_tensors="pt")
+        
+        gout = self.model.generate(
+            input_features=processed_in.input_features,
+            output_scores=True, return_dict_in_generate=True
+        )
+        
+        # Decode token ids to text
+        wave = self.processor.batch_decode(gout.sequences, skip_special_tokens=True)[0]
+        return wave
 
 def main():
-    input = "櫻子，令日你會去邊度玩呀？"
-    append_memory("user", input)
-    res = process_word()
-    print("BOT: {}".format(res))
-    append_memory("assistant", res)
 
-"""Full version main()"""
+    m = ChatboxMouth()
+    input = "櫻子，令日你會去邊度玩呀？"
+    m.speak(input)
+
+# """Full version main()"""
 # def main():
 #     ear = ChatboxEar() # ASR
 #     #TODO: Text Generation + Audio Generation + Interface (optional)
