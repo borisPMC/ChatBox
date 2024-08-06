@@ -1,10 +1,20 @@
 import sounddevice as sd
 import samplerate
-from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor, AutoModelForCausalLM, AutoTokenizer # version < 4.43
+from transformers import (
+    AutoModelForSpeechSeq2Seq, 
+    AutoProcessor, 
+    AutoModelForCausalLM, 
+    AutoTokenizer,
+    AutoModel
+) # version < 4.43
+from datasets import load_dataset
 import librosa
 import asyncio
 import torch # version < 2.3
 import numpy as np
+import scipy
+
+
 
 # Models are stored at C:\Users\{your username}}\.cache\huggingface\hub
 
@@ -54,7 +64,7 @@ class ChatboxEar:
 
             self.assistant_model.to(DEVICE)
     
-    def record_audio(self, duration=5.0, fs=INPUT_SAMPLE_RATE):
+    def listen_audio(self, duration=5.0, fs=INPUT_SAMPLE_RATE):
         """Record audio for a specified duration."""
         def preprocess_audio(audio: np.ndarray):
             
@@ -99,7 +109,7 @@ class ChatboxEar:
         return transcription
 
     async def main(self):
-        audio = self.record_audio()
+        audio = self.listen_audio()
         # save_audio(audio)
         # audio = import_audio("data_source\\audio_files\\世一.mp3")
         transcription = self.transcribe_audio(audio)  # Transcribe audio to text
@@ -108,8 +118,11 @@ class ChatboxEar:
 class ChatboxBrain:
 
     DIALOGUE = [
-        {"role": "system", "content": "你叫做櫻子，你要同用家北原伊織進行對話，你同北原伊織係情侶關係。"},
-        # {"role": "user", "content": "櫻子，令日你會去邊度玩呀？"}
+        {"role": "system", "content": "你是名爲波子的家務助理AI，和六至十二歲小孩子聊天，並保持其心理健康。"},
+        # {"role": "user", "content": "你好啊，我要食糖！"},
+        # {"role": "assitant", "content": "好的，我馬上給你一粒糖。吃糖可以讓人心情愉快，但請記住，吃太多糖會對身體造成負擔。"},
+        # {"role": "user", "content": "多謝你啊波子！"},
+        # {"role": "assitant", "content": "不用謝！很高興能夠幫助你。如果你還有其他需要幫助的事情，請隨時告訴我。"}
     ]
 
     def __init__(self) -> None:
@@ -167,35 +180,46 @@ class ChatboxBrain:
 
 class ChatboxMouth:
 
+    D_TYPE = 'float32'
+
     def __init__(self) -> None:
-        model_id = "xiaomaiiwn/vits-cantonese"
-        self.model = AutoModelForCausalLM.from_pretrained(
-            model_id,
-            torch_dtype = torch.bfloat16,
-            device_map = 'auto',
-        )
+        
+        model_id = "suno/bark-small"
+        
+        # Load model
+        self.processor = AutoProcessor.from_pretrained(model_id)
+        self.model = AutoModel.from_pretrained(model_id)
         
         self.model.to(DEVICE)
-        self.processor = AutoProcessor.from_pretrained(model_id)
 
     def speak(self, text):
         
-        processed_in = self.processor(text, sampling_rate=self.MODEL_SAMPLE_RATE, return_tensors="pt")
-        
-        gout = self.model.generate(
-            input_features=processed_in.input_features,
-            output_scores=True, return_dict_in_generate=True
+        processed_in = self.processor(
+            text=[text], 
+            return_tensors="pt"
         )
         
         # Decode token ids to text
-        wave = self.processor.batch_decode(gout.sequences, skip_special_tokens=True)[0]
-        return wave
+        speech_values = self.model.generate(**processed_in)
+
+        print(type(speech_values))
+        return speech_values
+    
+    def save_speech(self, speech) -> None:
+        audio_array = speech.cpu().numpy().squeeze()
+        sampling_rate = self.model.generation_config.sample_rate
+        scipy.io.wavfile.write("bark_out.wav", rate=sampling_rate, data=audio_array)
+        return
+
+    def main(self, text):
+        speech = self.speak(text)
+        self.save_speech(speech)
+        
 
 def main():
-
     m = ChatboxMouth()
-    input = "櫻子，令日你會去邊度玩呀？"
-    m.speak(input)
+    input = "Good morning, how are you today?"
+    m.main(input)
 
 # """Full version main()"""
 # def main():
@@ -204,7 +228,7 @@ def main():
 #     try:
 #         while True:
 #             text = asyncio.run(ear.main())
-#             print(f"Transcription: {text}")
+#             print(f"Input: {text}")
 #     except KeyboardInterrupt:
 #             print("\nExiting...")
 
